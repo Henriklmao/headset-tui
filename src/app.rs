@@ -15,6 +15,8 @@ pub struct UiState {
     pub battery_state: BatteryState,
     pub device_name: String,
     pub has_sidetone: bool,
+    /// Whether the level shown was read from the device instead of remembered.
+    pub sidetone_reported: bool,
     pub verbose_mode: bool,
     pub mode: Mode,
     /// Last failure reported by the headset backend, if any.
@@ -29,6 +31,7 @@ impl UiState {
             battery_state: BatteryState::Unavailable,
             device_name: String::new(),
             has_sidetone: true,
+            sidetone_reported: false,
             verbose_mode: false,
             mode,
             last_error: None,
@@ -52,6 +55,7 @@ pub fn apply_status(state: &mut UiState, result: Result<HeadsetStatus, HeadsetEr
             state.battery = Some(status.battery_level);
             state.battery_state = status.battery_state;
             state.has_sidetone = status.has_sidetone;
+            state.sidetone_reported = status.sidetone_level.is_some();
 
             // Only devices that can report the level update the gauge; on all
             // others the level last set through this app stays visible.
@@ -64,6 +68,7 @@ pub fn apply_status(state: &mut UiState, result: Result<HeadsetStatus, HeadsetEr
             state.battery_state = BatteryState::Unavailable;
             state.device_name = "Unknown Device".to_string();
             state.has_sidetone = false;
+            state.sidetone_reported = false;
         }
     }
 }
@@ -80,8 +85,8 @@ pub fn apply_action(action: Action, state: &mut UiState, headset: &dyn Headset) 
         Action::DecBy10 => shift(state, headset, -10),
         Action::IncBy1 => shift(state, headset, 1),
         Action::IncBy10 => shift(state, headset, 10),
-        Action::SetFull => set_level(state, headset, SIDETONE_MAX),
-        Action::SetNone => set_level(state, headset, 0),
+        Action::SetFull => set_sidetone_level(state, headset, SIDETONE_MAX),
+        Action::SetNone => set_sidetone_level(state, headset, 0),
         Action::ToggleVerbose => state.verbose_mode = !state.verbose_mode,
         Action::Config => return Outcome::OpenConfig,
         Action::Quit => return Outcome::Quit,
@@ -93,10 +98,11 @@ pub fn apply_action(action: Action, state: &mut UiState, headset: &dyn Headset) 
 
 fn shift(state: &mut UiState, headset: &dyn Headset, delta: i16) {
     let level = (i16::from(state.sidetone) + delta).clamp(0, i16::from(SIDETONE_MAX)) as u8;
-    set_level(state, headset, level);
+    set_sidetone_level(state, headset, level);
 }
 
-fn set_level(state: &mut UiState, headset: &dyn Headset, level: u8) {
+/// Set the sidetone level, update the gauge and remember any backend failure.
+pub fn set_sidetone_level(state: &mut UiState, headset: &dyn Headset, level: u8) {
     if state.sidetone == level {
         return;
     }
@@ -107,6 +113,8 @@ fn set_level(state: &mut UiState, headset: &dyn Headset, level: u8) {
     }
 
     state.sidetone = level;
+    // The displayed value now comes from this write, not a device read.
+    state.sidetone_reported = false;
 }
 
 /// Pick the level shown when the TUI starts.
@@ -226,6 +234,7 @@ mod tests {
         assert_eq!(state.battery_state, BatteryState::Unavailable);
         assert_eq!(state.device_name, "");
         assert!(state.has_sidetone);
+        assert!(!state.sidetone_reported);
         assert!(!state.verbose_mode);
         assert_eq!(state.mode, Mode::Normal);
         assert_eq!(state.last_error, None);
@@ -295,6 +304,7 @@ mod tests {
         apply_status(&mut state, Ok(status_with_sidetone(72)));
 
         assert_eq!(state.sidetone, 72);
+        assert!(state.sidetone_reported);
     }
 
     #[test]
@@ -304,6 +314,7 @@ mod tests {
         apply_status(&mut state, Ok(status(true)));
 
         assert_eq!(state.sidetone, 10);
+        assert!(!state.sidetone_reported);
     }
 
     #[test]
@@ -416,6 +427,17 @@ mod tests {
 
         assert_eq!(state.sidetone, 11);
         assert_eq!(headset.calls(), vec![11]);
+    }
+
+    #[test]
+    fn a_local_write_clears_the_device_reported_flag() {
+        let headset = MockHeadset::available();
+        let mut state = ui_state(10);
+        state.sidetone_reported = true;
+
+        apply_action(Action::IncBy1, &mut state, &headset);
+
+        assert!(!state.sidetone_reported);
     }
 
     #[test]

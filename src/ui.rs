@@ -1,22 +1,29 @@
 use crate::app::UiState;
 use crate::config::KeyConfig;
+use crate::config_editor::{ConfigEditor, KeyField, Row};
 use crate::headset::{BatteryState, SIDETONE_MAX};
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, Paragraph},
+    widgets::{Block, Borders, Clear, Gauge, Paragraph},
     Frame,
 };
 
-pub fn draw(f: &mut Frame, state: &UiState, keys: &KeyConfig) {
+pub fn draw_with_modal(
+    f: &mut Frame,
+    state: &UiState,
+    keys: &KeyConfig,
+    editor: Option<&ConfigEditor>,
+) {
+    let status_height = if state.verbose_mode { 9 } else { 5 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
         .constraints(
             [
                 Constraint::Length(3),
-                Constraint::Length(5),
+                Constraint::Length(status_height),
                 Constraint::Min(3),
                 Constraint::Length(3),
             ]
@@ -61,6 +68,58 @@ pub fn draw(f: &mut Frame, state: &UiState, keys: &KeyConfig) {
         )]),
     }];
 
+    if state.verbose_mode {
+        let detail = Style::default().fg(Color::DarkGray);
+
+        battery_text.push(Line::from(Span::styled(
+            format!(
+                "  State: {}   Mode: {}",
+                state.battery_state.label(),
+                if state.mode.is_test() {
+                    "Test"
+                } else {
+                    "Normal"
+                }
+            ),
+            detail,
+        )));
+        battery_text.push(Line::from(Span::styled(
+            format!(
+                "  Sidetone: {}   Level: {}/{}",
+                if state.has_sidetone {
+                    "supported"
+                } else {
+                    "unavailable"
+                },
+                state.sidetone,
+                SIDETONE_MAX
+            ),
+            detail,
+        )));
+        battery_text.push(Line::from(Span::styled(
+            format!(
+                "  Level source: {}",
+                if state.sidetone_reported {
+                    "read from device"
+                } else {
+                    "remembered by this app"
+                }
+            ),
+            detail,
+        )));
+        battery_text.push(Line::from(Span::styled(
+            format!(
+                "  Keys: {}",
+                if *keys == KeyConfig::default() {
+                    "default"
+                } else {
+                    "customized"
+                }
+            ),
+            detail,
+        )));
+    }
+
     if let Some(error) = &state.last_error {
         battery_text.push(Line::from(vec![Span::styled(
             format!("󰅚 {error}"),
@@ -68,8 +127,13 @@ pub fn draw(f: &mut Frame, state: &UiState, keys: &KeyConfig) {
         )]));
     }
 
-    let battery =
-        Paragraph::new(battery_text).block(Block::default().borders(Borders::ALL).title("Status"));
+    let status_title = if state.verbose_mode {
+        "Status — verbose"
+    } else {
+        "Status"
+    };
+    let battery = Paragraph::new(battery_text)
+        .block(Block::default().borders(Borders::ALL).title(status_title));
     f.render_widget(battery, chunks[1]);
 
     // Sidetone slider
@@ -108,12 +172,118 @@ pub fn draw(f: &mut Frame, state: &UiState, keys: &KeyConfig) {
         .alignment(Alignment::Center)
         .style(Style::default().fg(Color::DarkGray));
     f.render_widget(help, chunks[3]);
+
+    if let Some(editor) = editor {
+        draw_config_modal(f, editor);
+    }
+}
+
+/// Draw the configuration form centered over the main screen.
+fn draw_config_modal(f: &mut Frame, editor: &ConfigEditor) {
+    let area = f.area();
+    let rows = ConfigEditor::ROWS.len() as u16;
+    let width = area.width.saturating_sub(4).min(78);
+    let height = (rows + 7).min(area.height.saturating_sub(2));
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, popup);
+
+    let title = if editor.is_dirty() {
+        " Configuration — unsaved changes "
+    } else {
+        " Configuration "
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let mut lines = Vec::new();
+
+    for (index, row) in ConfigEditor::ROWS.iter().enumerate() {
+        let selected = index == editor.selected();
+        let line_style = if selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+
+        let text = match row {
+            Row::DefaultSidetone => {
+                let value = if editor.is_editing_sidetone() {
+                    format!("[{}_]", editor.sidetone_buffer())
+                } else {
+                    format!("[{}]", editor.config.default_sidetone)
+                };
+                format!("{:<38} {value}", "Default sidetone level (0-128):")
+            }
+            Row::Key(field) => {
+                let label = format!("{} ({}):", field.label(), key_field_name(*field));
+                format!(
+                    "{label:<38} [{}]",
+                    field.get(&editor.config.keys).to_uppercase()
+                )
+            }
+            Row::Save => "Save changes".to_string(),
+            Row::Cancel => "Cancel".to_string(),
+        };
+
+        // Pad the highlighted row to the full width so the selection reads as
+        // one continuous bar.
+        let padded = format!("{text:<width$}", width = inner.width as usize);
+        lines.push(Line::from(Span::styled(padded, line_style)));
+    }
+
+    if let Some(message) = &editor.message {
+        lines.push(Line::from(Span::styled(
+            message.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    lines.push(Line::from(Span::styled(
+        "↑/↓ select • type a key to bind • digits edit the level",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(Span::styled(
+        if editor.is_editing_sidetone() {
+            "Enter confirm • Esc cancel edit • F2 save"
+        } else {
+            "Enter confirm • F2 save • Esc cancel"
+        },
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn key_field_name(field: KeyField) -> &'static str {
+    match field {
+        KeyField::Dec1 => "dec1",
+        KeyField::Dec10 => "dec10",
+        KeyField::Inc1 => "inc1",
+        KeyField::Inc10 => "inc10",
+        KeyField::Full => "full",
+        KeyField::None => "none",
+        KeyField::Config => "config",
+        KeyField::Verbose => "verbose",
+        KeyField::Quit => "quit",
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cli::Mode;
+    use crate::config::Config;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::Terminal;
@@ -136,7 +306,7 @@ mod tests {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
-            .draw(|frame| draw(frame, state, keys))
+            .draw(|frame| draw_with_modal(frame, state, keys, None))
             .expect("draw should succeed");
         terminal.backend().buffer().clone()
     }
@@ -144,6 +314,30 @@ mod tests {
     /// Render `state` and flatten the buffer, one line per terminal row.
     fn render(state: &UiState, keys: &KeyConfig) -> String {
         buffer_to_string(&render_buffer(state, keys, WIDTH, HEIGHT))
+    }
+
+    fn render_with_editor(
+        state: &UiState,
+        keys: &KeyConfig,
+        editor: &ConfigEditor,
+        width: u16,
+        height: u16,
+    ) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| draw_with_modal(frame, state, keys, Some(editor)))
+            .expect("draw should succeed");
+
+        buffer_to_string(terminal.backend().buffer())
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn editor() -> ConfigEditor {
+        ConfigEditor::new(Config::default())
     }
 
     fn buffer_to_string(buffer: &Buffer) -> String {
@@ -365,6 +559,141 @@ mod tests {
         assert!(rendered.contains("Sidetone: not available"));
         assert!(!rendered.contains("42/128"));
         assert!(!rendered.contains("Sidetone Level"));
+    }
+
+    // -- verbose mode ------------------------------------------------------
+
+    #[test]
+    fn verbose_mode_shows_extra_status_details() {
+        let mut state = state();
+        state.verbose_mode = true;
+        state.sidetone_reported = true;
+
+        let rendered = render(&state, &KeyConfig::default());
+
+        assert!(rendered.contains("Status — verbose"));
+        assert!(rendered.contains("State: Medium"));
+        assert!(rendered.contains("Mode: Normal"));
+        assert!(rendered.contains("Sidetone: supported"));
+        assert!(rendered.contains("Level: 42/128"));
+        assert!(rendered.contains("Level source: read from device"));
+        assert!(rendered.contains("Keys: default"));
+    }
+
+    #[test]
+    fn verbose_mode_hides_the_extra_details_when_off() {
+        let rendered = render(&state(), &KeyConfig::default());
+
+        assert!(rendered.contains("Status"));
+        assert!(!rendered.contains("Status — verbose"));
+        assert!(!rendered.contains("Level source:"));
+    }
+
+    #[test]
+    fn verbose_mode_reports_remembered_levels_and_custom_keys() {
+        let mut state = state();
+        state.verbose_mode = true;
+        state.sidetone_reported = false;
+        let keys = KeyConfig {
+            dec1: 'j',
+            ..KeyConfig::default()
+        };
+
+        let rendered = render(&state, &keys);
+
+        assert!(rendered.contains("Level source: remembered by this app"));
+        assert!(rendered.contains("Keys: customized"));
+    }
+
+    #[test]
+    fn verbose_mode_shows_test_mode() {
+        let mut state = state();
+        state.verbose_mode = true;
+        state.mode = Mode::Test;
+
+        let rendered = render(&state, &KeyConfig::default());
+
+        assert!(rendered.contains("Mode: Test"));
+    }
+
+    #[test]
+    fn verbose_mode_renders_in_a_small_terminal() {
+        let mut state = state();
+        state.verbose_mode = true;
+
+        let buffer = render_buffer(&state, &KeyConfig::default(), 40, 16);
+        let rendered = buffer_to_string(&buffer);
+
+        assert!(rendered.contains("Status — verbose"));
+        assert_eq!(buffer.area().width, 40);
+    }
+
+    // -- configuration modal ----------------------------------------------
+
+    #[test]
+    fn config_modal_renders_every_row() {
+        let editor = editor();
+        let rendered = render_with_editor(&state(), &KeyConfig::default(), &editor, WIDTH, HEIGHT);
+
+        for expected in [
+            "Configuration",
+            "Default sidetone level (0-128):",
+            "Decrease sidetone by 1 (dec1):",
+            "Decrease sidetone by 10 (dec10):",
+            "Increase sidetone by 1 (inc1):",
+            "Increase sidetone by 10 (inc10):",
+            "Set sidetone to full (128) (full):",
+            "Set sidetone to none (0) (none):",
+            "Open configuration menu (config):",
+            "Toggle verbose mode (verbose):",
+            "Quit the application (quit):",
+            "Save changes",
+            "Cancel",
+            "F2 save",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "missing {expected:?} in:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_modal_shows_current_values() {
+        let editor = editor();
+        let rendered = render_with_editor(&state(), &KeyConfig::default(), &editor, WIDTH, HEIGHT);
+
+        assert!(rendered.contains("[0]"));
+        assert!(rendered.contains("[A]"));
+    }
+
+    #[test]
+    fn config_modal_marks_unsaved_changes() {
+        let mut editor = editor();
+        editor.config.keys.dec1 = 'j';
+
+        let rendered = render_with_editor(&state(), &KeyConfig::default(), &editor, WIDTH, HEIGHT);
+
+        assert!(rendered.contains("unsaved changes"));
+    }
+
+    #[test]
+    fn config_modal_shows_the_sidetone_edit_buffer() {
+        let mut editor = editor();
+        editor.handle_key(key(KeyCode::Char('6')));
+
+        let rendered = render_with_editor(&state(), &KeyConfig::default(), &editor, WIDTH, HEIGHT);
+
+        assert!(rendered.contains("[6_]"));
+    }
+
+    #[test]
+    fn config_modal_renders_in_a_small_terminal() {
+        let editor = editor();
+        let rendered = render_with_editor(&state(), &KeyConfig::default(), &editor, 40, 16);
+
+        assert!(rendered.contains("Configuration"));
+        assert!(rendered.contains("Save changes"));
     }
 
     #[test]

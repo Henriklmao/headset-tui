@@ -32,6 +32,17 @@ impl BatteryState {
             _ => BatteryState::Low,
         }
     }
+
+    /// Short human readable label for the verbose status panel.
+    pub fn label(self) -> &'static str {
+        match self {
+            BatteryState::Charging => "Charging",
+            BatteryState::Good => "Good",
+            BatteryState::Medium => "Medium",
+            BatteryState::Low => "Low",
+            BatteryState::Unavailable => "Unavailable",
+        }
+    }
 }
 
 /// Everything the application needs to know about the connected headset.
@@ -330,6 +341,19 @@ mod tests {
                 expected,
                 "level {level} should map to {expected:?}"
             );
+        }
+    }
+
+    #[test]
+    fn battery_state_labels_are_stable() {
+        for (state, expected) in [
+            (BatteryState::Charging, "Charging"),
+            (BatteryState::Good, "Good"),
+            (BatteryState::Medium, "Medium"),
+            (BatteryState::Low, "Low"),
+            (BatteryState::Unavailable, "Unavailable"),
+        ] {
+            assert_eq!(state.label(), expected, "{state:?}");
         }
     }
 

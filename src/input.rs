@@ -16,14 +16,18 @@ pub enum Action {
     None,
 }
 
-/// Poll the terminal for up to 100 ms and map a key press to an [`Action`].
-pub fn handle_input(keys: &KeyConfig) -> Action {
+/// Poll the terminal for up to 100 ms and return a raw key event.
+///
+/// The configuration modal needs the raw event, while the main screen maps it
+/// to an [`Action`] with [`key_to_action`].
+pub fn poll_key() -> Option<KeyEvent> {
     if event::poll(Duration::from_millis(100)).unwrap_or(false) {
         if let Ok(Event::Key(key)) = event::read() {
-            return key_to_action(key, keys);
+            return Some(key);
         }
     }
-    Action::None
+
+    None
 }
 
 /// Map a key event to an action using the configured bindings.

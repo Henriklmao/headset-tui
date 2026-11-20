@@ -1,6 +1,7 @@
 mod app;
 mod cli;
 mod config;
+mod config_editor;
 mod headset;
 mod input;
 mod ui;
@@ -20,6 +21,7 @@ use std::time::{Duration, Instant};
 use app::{Outcome, UiState};
 use cli::{Cli, Command, Mode};
 use config::KeyConfig;
+use config_editor::{ConfigEditor, EditorOutcome};
 use headset::{Headset, HeadsetControl};
 use input::Action;
 
@@ -178,13 +180,74 @@ fn run_app(
     state_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut last_refresh = Instant::now();
+    let mut editor: Option<ConfigEditor> = None;
 
     loop {
         terminal.draw(|frame| {
-            ui::draw(frame, state, keys);
+            ui::draw_with_modal(frame, state, keys, editor.as_ref());
         })?;
 
-        let action = input::handle_input(keys);
+        let key = input::poll_key();
+
+        // While the modal is open it owns the keyboard.
+        if editor.is_some() {
+            let outcome = match (editor.as_mut(), key) {
+                (Some(active), Some(key)) => active.handle_key(key),
+                _ => EditorOutcome::Continue,
+            };
+
+            match outcome {
+                EditorOutcome::Continue => {}
+                EditorOutcome::Cancel => {
+                    editor = None;
+                    last_refresh = Instant::now();
+                }
+                EditorOutcome::Save(config) => {
+                    let path = config::config_path(state.mode);
+
+                    match config::save_to_path(&path, &config) {
+                        Ok(()) => {
+                            let default_changed = editor
+                                .as_ref()
+                                .map(|active| {
+                                    active.original.default_sidetone != config.default_sidetone
+                                })
+                                .unwrap_or(false);
+
+                            *keys = config.keys.clone();
+                            editor = None;
+
+                            // A changed default is an explicit choice, so make
+                            // it visible immediately instead of only on the
+                            // next start. This includes 0 (sidetone off).
+                            if default_changed {
+                                app::set_sidetone_level(state, headset, config.default_sidetone);
+
+                                if let Err(err) =
+                                    save_sidetone_state(level_path, state_path, state.sidetone)
+                                {
+                                    state.last_error =
+                                        Some(format!("could not save sidetone state: {err}"));
+                                }
+                            }
+
+                            last_refresh = Instant::now();
+                        }
+                        Err(err) => {
+                            if let Some(active) = editor.as_mut() {
+                                active.message = Some(format!("Could not save: {err}"));
+                            }
+                        }
+                    }
+                }
+            }
+
+            continue;
+        }
+
+        let action = key
+            .map(|key| input::key_to_action(key, keys))
+            .unwrap_or(Action::None);
 
         // Idle ticks refresh the battery display. Polling that often would run
         // headsetcontrol several times per second, so throttle it.
@@ -209,23 +272,7 @@ fn run_app(
             Outcome::Quit => break,
             Outcome::Continue => {}
             Outcome::OpenConfig => {
-                disable_raw_mode()?;
-                execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-                terminal.show_cursor()?;
-
-                let stdin = io::stdin();
-                let mut input = stdin.lock();
-                let mut output = io::stdout();
-                config::interactive_config(state.mode, &mut input, &mut output)?;
-
-                enable_raw_mode()?;
-                execute!(terminal.backend_mut(), EnterAlternateScreen)?;
-                terminal.hide_cursor()?;
-                terminal.clear()?;
-
-                *keys = config::load(state.mode).keys;
-                app::apply_status(state, headset.status());
-                last_refresh = Instant::now();
+                editor = Some(ConfigEditor::new(config::load(state.mode)));
             }
         }
 

@@ -13,7 +13,8 @@ A simple Rust and [ratatui](https://ratatui.rs/) based integration of HeadsetCon
 - **Battery Display** - Shows battery percentage with color-coded icons (green >50%, yellow 15-50%, red <15%)
 - **Sidetone Control** - Interactive TUI to adjust sidetone levels (0-128)
 - **Persistent Sidetone** - The last level set through the app is remembered and restored on the next start
-- **Configurable Keys** - Customize all keybindings and default sidetone via interactive config or terminal
+- **In-TUI Configuration** - Press `c` to rebind keys and edit the default sidetone in a modal
+- **Verbose Mode** - Press `v` to show the battery state, sidetone source, mode and key status
 - **Test Mode** - `--test` runs the whole tool against HeadsetControl's simulated device, no headset required
 - Automatically hidden from your waybar when no headphones are connected. Tui can still be launched from your terminal.
 
@@ -104,7 +105,13 @@ Configuration is automatically created at `~/.config/headset-tui/config.toml`.
 To configure interactively, either:
 
 - Run: `headset-tui --config`
-- Or press `c` inside the tui to interactively set your bindings.
+- Or press `c` inside the TUI. This opens a configuration modal without leaving
+  the interface:
+  - `↑`/`↓` or `Tab`/`Shift+Tab` select a row.
+  - Type a key while a binding row is selected to rebind it.
+  - Type digits while the default sidetone row is selected, then `Enter` to
+    confirm.
+  - `F2` saves and closes; `Esc` cancels.
 
 Default keybindings:
 
@@ -112,7 +119,9 @@ Default keybindings:
 - **d/w** - Increase sidetone by 1/10
 - **f** - Set sidetone to full (128)
 - **e** - Set sidetone to none (0)
-- **c** - Open configuration menu
+- **c** - Open the configuration modal
+- **v** - Toggle verbose mode (battery state, sidetone source, mode, and whether
+  the keys are customized)
 - **q/ESC** - Quit
 
 ## Usage
