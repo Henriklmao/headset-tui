@@ -3,84 +3,9 @@
 //! The editor is a small form rendered as a modal over the main screen. It owns
 //! a copy of the configuration, so cancelling never touches the file on disk.
 
-use crate::config::{Config, KeyConfig};
+use crate::config::{normalise_binding, Config, KeyField};
 use crate::headset::SIDETONE_MAX;
 use crossterm::event::{KeyCode, KeyEvent};
-
-/// One configurable keybinding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeyField {
-    Dec1,
-    Dec10,
-    Inc1,
-    Inc10,
-    Full,
-    None,
-    Config,
-    Verbose,
-    Quit,
-}
-
-impl KeyField {
-    /// Every keybinding, in the order the editor lists them.
-    #[cfg(test)]
-    pub const ALL: [KeyField; 9] = [
-        KeyField::Dec1,
-        KeyField::Dec10,
-        KeyField::Inc1,
-        KeyField::Inc10,
-        KeyField::Full,
-        KeyField::None,
-        KeyField::Config,
-        KeyField::Verbose,
-        KeyField::Quit,
-    ];
-
-    /// Human readable description, matching the `--config` dialog.
-    pub fn label(self) -> &'static str {
-        match self {
-            KeyField::Dec1 => "Decrease sidetone by 1",
-            KeyField::Dec10 => "Decrease sidetone by 10",
-            KeyField::Inc1 => "Increase sidetone by 1",
-            KeyField::Inc10 => "Increase sidetone by 10",
-            KeyField::Full => "Set sidetone to full (128)",
-            KeyField::None => "Set sidetone to none (0)",
-            KeyField::Config => "Open configuration menu",
-            KeyField::Verbose => "Toggle verbose mode",
-            KeyField::Quit => "Quit the application",
-        }
-    }
-
-    /// The character currently bound to this field.
-    pub fn get(self, keys: &KeyConfig) -> char {
-        match self {
-            KeyField::Dec1 => keys.dec1,
-            KeyField::Dec10 => keys.dec10,
-            KeyField::Inc1 => keys.inc1,
-            KeyField::Inc10 => keys.inc10,
-            KeyField::Full => keys.full,
-            KeyField::None => keys.none,
-            KeyField::Config => keys.config,
-            KeyField::Verbose => keys.verbose,
-            KeyField::Quit => keys.quit,
-        }
-    }
-
-    /// Bind `value` to this field.
-    pub fn set(self, keys: &mut KeyConfig, value: char) {
-        match self {
-            KeyField::Dec1 => keys.dec1 = value,
-            KeyField::Dec10 => keys.dec10 = value,
-            KeyField::Inc1 => keys.inc1 = value,
-            KeyField::Inc10 => keys.inc10 = value,
-            KeyField::Full => keys.full = value,
-            KeyField::None => keys.none = value,
-            KeyField::Config => keys.config = value,
-            KeyField::Verbose => keys.verbose = value,
-            KeyField::Quit => keys.quit = value,
-        }
-    }
-}
 
 /// One selectable row in the editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +58,7 @@ impl ConfigEditor {
 
     pub fn new(config: Config) -> Self {
         let original = config.clone();
+        let message = config.keys.conflict().map(|conflict| conflict.to_string());
 
         Self {
             config,
@@ -141,7 +67,7 @@ impl ConfigEditor {
             editing_sidetone: false,
             sidetone_buffer: String::new(),
             sidetone_fresh: false,
-            message: None,
+            message,
         }
     }
 
@@ -203,7 +129,7 @@ impl ConfigEditor {
             }
             KeyCode::Enter => self.activate(),
             KeyCode::Esc => EditorOutcome::Cancel,
-            KeyCode::F(2) => EditorOutcome::Save(self.config.clone()),
+            KeyCode::F(2) => self.save(),
             KeyCode::Char(character) if !character.is_control() => {
                 if character == ' ' && matches!(self.selected_row(), Row::Save | Row::Cancel) {
                     self.activate()
@@ -226,8 +152,18 @@ impl ConfigEditor {
                 self.next();
                 EditorOutcome::Continue
             }
-            Row::Save => EditorOutcome::Save(self.config.clone()),
+            Row::Save => self.save(),
             Row::Cancel => EditorOutcome::Cancel,
+        }
+    }
+
+    fn save(&mut self) -> EditorOutcome {
+        match self.config.keys.conflict() {
+            Some(conflict) => {
+                self.message = Some(conflict.to_string());
+                EditorOutcome::Continue
+            }
+            None => EditorOutcome::Save(self.config.clone()),
         }
     }
 
@@ -242,8 +178,20 @@ impl ConfigEditor {
                 }
             }
             Row::Key(field) => {
-                field.set(&mut self.config.keys, normalise(character));
-                self.message = None;
+                let key = normalise_binding(character);
+                match self.config.keys.binding_available(field, key) {
+                    Ok(()) => {
+                        field.set(&mut self.config.keys, key);
+                        // A different field may still carry a conflict loaded
+                        // from an older config, so re-check the whole set.
+                        self.message = self
+                            .config
+                            .keys
+                            .conflict()
+                            .map(|conflict| conflict.to_string());
+                    }
+                    Err(conflict) => self.message = Some(conflict.to_string()),
+                }
             }
             // Save and Cancel are activated by Enter or Space in `handle_key`;
             // other characters are ignored here.
@@ -303,7 +251,7 @@ impl ConfigEditor {
             }
             KeyCode::F(2) => {
                 if self.commit_sidetone() {
-                    EditorOutcome::Save(self.config.clone())
+                    self.save()
                 } else {
                     EditorOutcome::Continue
                 }
@@ -331,14 +279,10 @@ impl ConfigEditor {
     }
 }
 
-/// Lowercase a binding so uppercase and lowercase input behave the same way.
-fn normalise(character: char) -> char {
-    character.to_lowercase().next().unwrap_or(character)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::KeyConfig;
     use crossterm::event::{KeyEvent, KeyModifiers};
 
     fn press(code: KeyCode) -> KeyEvent {
@@ -358,32 +302,6 @@ mod tests {
             .iter()
             .position(|candidate| *candidate == row)
             .expect("row exists");
-    }
-
-    // -- KeyField ----------------------------------------------------------
-
-    #[test]
-    fn key_fields_cover_every_binding() {
-        let mut keys = KeyConfig::default();
-
-        for (index, field) in KeyField::ALL.iter().enumerate() {
-            let value = char::from(b'a' + index as u8);
-            field.set(&mut keys, value);
-            assert_eq!(field.get(&keys), value, "{field:?}");
-        }
-    }
-
-    #[test]
-    fn key_field_labels_match_the_config_dialog() {
-        assert_eq!(KeyField::Dec1.label(), "Decrease sidetone by 1");
-        assert_eq!(KeyField::Dec10.label(), "Decrease sidetone by 10");
-        assert_eq!(KeyField::Inc1.label(), "Increase sidetone by 1");
-        assert_eq!(KeyField::Inc10.label(), "Increase sidetone by 10");
-        assert_eq!(KeyField::Full.label(), "Set sidetone to full (128)");
-        assert_eq!(KeyField::None.label(), "Set sidetone to none (0)");
-        assert_eq!(KeyField::Config.label(), "Open configuration menu");
-        assert_eq!(KeyField::Verbose.label(), "Toggle verbose mode");
-        assert_eq!(KeyField::Quit.label(), "Quit the application");
     }
 
     // -- construction and navigation --------------------------------------
@@ -466,9 +384,9 @@ mod tests {
         let mut editor = editor();
         select(&mut editor, Row::Key(KeyField::Dec1));
 
-        editor.handle_key(character('j'));
+        editor.handle_key(character('z'));
 
-        assert_eq!(editor.config.keys.dec1, 'j');
+        assert_eq!(editor.config.keys.dec1, 'z');
         assert!(editor.is_dirty());
     }
 
@@ -508,7 +426,7 @@ mod tests {
         let mut editor = editor();
         select(&mut editor, Row::Key(KeyField::Dec1));
 
-        editor.handle_key(character('j'));
+        editor.handle_key(character('z'));
 
         assert_eq!(editor.config.keys.dec10, 's');
         assert_eq!(editor.config.keys.inc1, 'd');
@@ -525,14 +443,103 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_bindings_are_allowed() {
+    fn duplicate_bindings_are_rejected() {
         let mut editor = editor();
         select(&mut editor, Row::Key(KeyField::Quit));
 
         editor.handle_key(character('a'));
 
-        assert_eq!(editor.config.keys.quit, 'a');
+        assert_eq!(editor.config.keys.quit, 'q');
         assert_eq!(editor.config.keys.dec1, 'a');
+        assert_eq!(
+            editor.message.as_deref(),
+            Some("quit: 'a' is already bound to dec1")
+        );
+        assert!(!editor.is_dirty());
+    }
+
+    #[test]
+    fn reserved_shortcut_keys_are_rejected() {
+        let mut editor = editor();
+        select(&mut editor, Row::Key(KeyField::Quit));
+
+        editor.handle_key(character('j'));
+
+        assert_eq!(editor.config.keys.quit, 'q');
+        assert_eq!(
+            editor.message.as_deref(),
+            Some("quit: 'j' is reserved for sidetone control")
+        );
+        assert!(!editor.is_dirty());
+    }
+
+    #[test]
+    fn a_valid_rebind_clears_a_conflict_message() {
+        let mut editor = editor();
+        select(&mut editor, Row::Key(KeyField::Quit));
+
+        editor.handle_key(character('a'));
+        assert!(editor.message.is_some());
+
+        editor.handle_key(character('z'));
+
+        assert_eq!(editor.config.keys.quit, 'z');
+        assert_eq!(editor.message, None);
+    }
+
+    #[test]
+    fn an_invalid_config_cannot_be_saved() {
+        let mut config = Config::default();
+        config.keys.dec10 = 'a';
+        let mut editor = ConfigEditor::new(config);
+
+        assert_eq!(
+            editor.message.as_deref(),
+            Some("dec10: 'a' is already bound to dec1")
+        );
+        assert_eq!(
+            editor.handle_key(press(KeyCode::F(2))),
+            EditorOutcome::Continue
+        );
+        assert!(editor.message.is_some());
+    }
+
+    #[test]
+    fn fixing_one_conflict_keeps_other_conflicts_visible() {
+        let config = Config {
+            keys: KeyConfig {
+                dec1: 'h',
+                ..KeyConfig::default()
+            },
+            ..Config::default()
+        };
+        let mut editor = ConfigEditor::new(config);
+
+        select(&mut editor, Row::Key(KeyField::Dec10));
+        editor.handle_key(character('z'));
+        assert_eq!(
+            editor.message.as_deref(),
+            Some("dec1: 'h' is reserved for sidetone control")
+        );
+
+        select(&mut editor, Row::Key(KeyField::Dec1));
+        editor.handle_key(character('b'));
+        assert_eq!(editor.message, None);
+    }
+
+    #[test]
+    fn fixing_a_loaded_conflict_allows_saving() {
+        let mut config = Config::default();
+        config.keys.dec10 = 'a';
+        let mut editor = ConfigEditor::new(config);
+
+        select(&mut editor, Row::Key(KeyField::Dec10));
+        editor.handle_key(character('z'));
+
+        assert_eq!(
+            editor.handle_key(press(KeyCode::F(2))),
+            EditorOutcome::Save(editor.config.clone())
+        );
     }
 
     // -- default sidetone --------------------------------------------------
@@ -657,13 +664,13 @@ mod tests {
     fn save_row_returns_the_edited_config() {
         let mut editor = editor();
         select(&mut editor, Row::Key(KeyField::Dec1));
-        editor.handle_key(character('j'));
+        editor.handle_key(character('z'));
         select(&mut editor, Row::Save);
 
         let outcome = editor.handle_key(press(KeyCode::Enter));
 
         match outcome {
-            EditorOutcome::Save(config) => assert_eq!(config.keys.dec1, 'j'),
+            EditorOutcome::Save(config) => assert_eq!(config.keys.dec1, 'z'),
             other => panic!("expected Save, got {other:?}"),
         }
     }
@@ -691,10 +698,10 @@ mod tests {
     fn f2_saves_from_the_form() {
         let mut editor = editor();
         select(&mut editor, Row::Key(KeyField::Dec1));
-        editor.handle_key(character('j'));
+        editor.handle_key(character('z'));
 
         match editor.handle_key(press(KeyCode::F(2))) {
-            EditorOutcome::Save(config) => assert_eq!(config.keys.dec1, 'j'),
+            EditorOutcome::Save(config) => assert_eq!(config.keys.dec1, 'z'),
             other => panic!("expected Save, got {other:?}"),
         }
     }
@@ -746,7 +753,7 @@ mod tests {
         let mut editor = editor();
         select(&mut editor, Row::Key(KeyField::Dec1));
 
-        editor.handle_key(character('j'));
+        editor.handle_key(character('z'));
         assert!(editor.is_dirty());
 
         editor.handle_key(character('a'));

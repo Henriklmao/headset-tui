@@ -124,6 +124,17 @@ Default keybindings:
   the keys are customized)
 - **q/ESC** - Quit
 
+Fixed sidetone shortcuts, always available:
+
+- **← / h** - Decrease sidetone by 1
+- **→ / l** - Increase sidetone by 1
+- **↓ / j** - Decrease sidetone by 10
+- **↑ / k** - Increase sidetone by 10
+
+`h`, `j`, `k`, and `l` are reserved for these shortcuts and cannot be assigned
+to another action. Keybindings must also be unique; both the configuration
+modal and the `--config` dialog reject a key that is already in use.
+
 ## Usage
 
 Launch the interactive TUI:

@@ -3,6 +3,7 @@
 use crate::cli::Mode;
 use crate::headset::SIDETONE_MAX;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -34,6 +35,184 @@ impl Default for KeyConfig {
             config: 'c',
             verbose: 'v',
         }
+    }
+}
+
+/// One configurable keybinding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyField {
+    Dec1,
+    Dec10,
+    Inc1,
+    Inc10,
+    Full,
+    None,
+    Config,
+    Verbose,
+    Quit,
+}
+
+impl KeyField {
+    /// Every keybinding, in the order the dialogs list them.
+    pub const ALL: [KeyField; 9] = [
+        KeyField::Dec1,
+        KeyField::Dec10,
+        KeyField::Inc1,
+        KeyField::Inc10,
+        KeyField::Full,
+        KeyField::None,
+        KeyField::Config,
+        KeyField::Verbose,
+        KeyField::Quit,
+    ];
+
+    /// Human readable description, matching the key binding dialogs.
+    pub fn label(self) -> &'static str {
+        match self {
+            KeyField::Dec1 => "Decrease sidetone by 1",
+            KeyField::Dec10 => "Decrease sidetone by 10",
+            KeyField::Inc1 => "Increase sidetone by 1",
+            KeyField::Inc10 => "Increase sidetone by 10",
+            KeyField::Full => "Set sidetone to full (128)",
+            KeyField::None => "Set sidetone to none (0)",
+            KeyField::Config => "Open configuration menu",
+            KeyField::Verbose => "Toggle verbose mode",
+            KeyField::Quit => "Quit the application",
+        }
+    }
+
+    /// Name used in the TOML file and in conflict messages.
+    pub fn name(self) -> &'static str {
+        match self {
+            KeyField::Dec1 => "dec1",
+            KeyField::Dec10 => "dec10",
+            KeyField::Inc1 => "inc1",
+            KeyField::Inc10 => "inc10",
+            KeyField::Full => "full",
+            KeyField::None => "none",
+            KeyField::Config => "config",
+            KeyField::Verbose => "verbose",
+            KeyField::Quit => "quit",
+        }
+    }
+
+    /// The character currently bound to this field.
+    pub fn get(self, keys: &KeyConfig) -> char {
+        match self {
+            KeyField::Dec1 => keys.dec1,
+            KeyField::Dec10 => keys.dec10,
+            KeyField::Inc1 => keys.inc1,
+            KeyField::Inc10 => keys.inc10,
+            KeyField::Full => keys.full,
+            KeyField::None => keys.none,
+            KeyField::Config => keys.config,
+            KeyField::Verbose => keys.verbose,
+            KeyField::Quit => keys.quit,
+        }
+    }
+
+    /// Bind `value` to this field.
+    pub fn set(self, keys: &mut KeyConfig, value: char) {
+        match self {
+            KeyField::Dec1 => keys.dec1 = value,
+            KeyField::Dec10 => keys.dec10 = value,
+            KeyField::Inc1 => keys.inc1 = value,
+            KeyField::Inc10 => keys.inc10 = value,
+            KeyField::Full => keys.full = value,
+            KeyField::None => keys.none = value,
+            KeyField::Config => keys.config = value,
+            KeyField::Verbose => keys.verbose = value,
+            KeyField::Quit => keys.quit = value,
+        }
+    }
+}
+
+/// Characters reserved for the built-in sidetone shortcuts.
+pub const RESERVED_BINDINGS: [char; 4] = ['h', 'j', 'k', 'l'];
+
+/// Normalize a binding so uppercase and lowercase input compare equal.
+pub fn normalise_binding(character: char) -> char {
+    character.to_lowercase().next().unwrap_or(character)
+}
+
+/// Why a key cannot be assigned to a field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyConflict {
+    /// The key is one of the fixed sidetone shortcuts.
+    Reserved { field: KeyField, key: char },
+    /// Another action already uses the key.
+    Duplicate {
+        field: KeyField,
+        key: char,
+        other: KeyField,
+    },
+}
+
+impl fmt::Display for KeyConflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            KeyConflict::Reserved { field, key } => {
+                write!(
+                    f,
+                    "{}: '{key}' is reserved for sidetone control",
+                    field.name()
+                )
+            }
+            KeyConflict::Duplicate { field, key, other } => {
+                write!(
+                    f,
+                    "{}: '{key}' is already bound to {}",
+                    field.name(),
+                    other.name()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for KeyConflict {}
+
+impl KeyConfig {
+    /// Check whether `key` can be assigned to `field`.
+    pub fn binding_available(&self, field: KeyField, key: char) -> Result<(), KeyConflict> {
+        let key = normalise_binding(key);
+
+        if RESERVED_BINDINGS.contains(&key) {
+            return Err(KeyConflict::Reserved { field, key });
+        }
+
+        for other in KeyField::ALL {
+            if other != field && normalise_binding(other.get(self)) == key {
+                return Err(KeyConflict::Duplicate { field, key, other });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// The first conflicting binding in the configuration, if any.
+    pub fn conflict(&self) -> Option<KeyConflict> {
+        let mut seen: Vec<(char, KeyField)> = Vec::new();
+
+        for field in KeyField::ALL {
+            let key = normalise_binding(field.get(self));
+
+            if RESERVED_BINDINGS.contains(&key) {
+                return Some(KeyConflict::Reserved { field, key });
+            }
+
+            if let Some((_, other)) = seen.iter().find(|(seen_key, _)| *seen_key == key) {
+                return Some(KeyConflict::Duplicate {
+                    field,
+                    key,
+                    other: *other,
+                });
+            }
+
+            seen.push((key, field));
+        }
+
+        None
     }
 }
 
@@ -178,30 +357,37 @@ pub fn interactive_config_at(
 
     writeln!(output, "\n=== Key Bindings ===\n")?;
 
-    let keys_to_configure = [
-        ("dec1", "Decrease sidetone by 1", &mut config.keys.dec1),
-        ("dec10", "Decrease sidetone by 10", &mut config.keys.dec10),
-        ("inc1", "Increase sidetone by 1", &mut config.keys.inc1),
-        ("inc10", "Increase sidetone by 10", &mut config.keys.inc10),
-        ("full", "Set sidetone to full (128)", &mut config.keys.full),
-        ("none", "Set sidetone to none (0)", &mut config.keys.none),
-        ("config", "Open configuration menu", &mut config.keys.config),
-        ("verbose", "Toggle verbose mode", &mut config.keys.verbose),
-        ("quit", "Quit the application", &mut config.keys.quit),
-    ];
+    loop {
+        for field in KeyField::ALL {
+            write!(
+                output,
+                "{} ({}): [{}] ",
+                field.label(),
+                field.name(),
+                field.get(&config.keys)
+            )?;
+            output.flush()?;
 
-    for (key_name, description, key) in keys_to_configure {
-        write!(output, "{description} ({key_name}): [{}] ", *key)?;
-        output.flush()?;
+            let Some(line) = read_line(input)? else {
+                writeln!(output, "\nInput closed, changes discarded")?;
+                return Ok(());
+            };
 
-        let Some(line) = read_line(input)? else {
-            writeln!(output, "\nInput closed, changes discarded")?;
-            return Ok(());
-        };
+            let trimmed = line.trim();
+            if let Some(character) = trimmed.chars().next() {
+                field.set(&mut config.keys, normalise_binding(character));
+            }
+        }
 
-        let trimmed = line.trim();
-        if let Some(character) = trimmed.chars().next() {
-            *key = character.to_lowercase().next().unwrap_or(character);
+        match config.keys.conflict() {
+            Some(conflict) => {
+                writeln!(output, "\nInvalid keybindings: {conflict}")?;
+                writeln!(
+                    output,
+                    "Please enter a different key for the conflicting binding (Ctrl+D discards)."
+                )?;
+            }
+            None => break,
         }
     }
 
@@ -445,6 +631,168 @@ quit = \"r\"
 
         assert_eq!(config.keys, KeyConfig::default());
         assert_eq!(config.default_sidetone, 0);
+    }
+
+    // ------------------------------------------------------------ key fields
+
+    #[test]
+    fn key_fields_cover_every_binding() {
+        let mut keys = KeyConfig::default();
+
+        for (index, field) in KeyField::ALL.iter().enumerate() {
+            let value = char::from(b'a' + index as u8);
+            field.set(&mut keys, value);
+            assert_eq!(field.get(&keys), value, "{field:?}");
+        }
+    }
+
+    #[test]
+    fn key_field_labels_and_names_are_stable() {
+        for (field, label, name) in [
+            (KeyField::Dec1, "Decrease sidetone by 1", "dec1"),
+            (KeyField::Dec10, "Decrease sidetone by 10", "dec10"),
+            (KeyField::Inc1, "Increase sidetone by 1", "inc1"),
+            (KeyField::Inc10, "Increase sidetone by 10", "inc10"),
+            (KeyField::Full, "Set sidetone to full (128)", "full"),
+            (KeyField::None, "Set sidetone to none (0)", "none"),
+            (KeyField::Config, "Open configuration menu", "config"),
+            (KeyField::Verbose, "Toggle verbose mode", "verbose"),
+            (KeyField::Quit, "Quit the application", "quit"),
+        ] {
+            assert_eq!(field.label(), label, "{field:?}");
+            assert_eq!(field.name(), name, "{field:?}");
+        }
+    }
+
+    // ------------------------------------------------------- key conflicts
+
+    #[test]
+    fn normalise_binding_lowercases() {
+        assert_eq!(normalise_binding('A'), 'a');
+        assert_eq!(normalise_binding('z'), 'z');
+        assert_eq!(normalise_binding('Ä'), 'ä');
+    }
+
+    #[test]
+    fn default_bindings_have_no_conflict() {
+        assert_eq!(KeyConfig::default().conflict(), None);
+    }
+
+    #[test]
+    fn duplicate_bindings_are_detected() {
+        let keys = KeyConfig {
+            dec10: 'a',
+            ..KeyConfig::default()
+        };
+
+        assert_eq!(
+            keys.conflict(),
+            Some(KeyConflict::Duplicate {
+                field: KeyField::Dec10,
+                key: 'a',
+                other: KeyField::Dec1,
+            })
+        );
+    }
+
+    #[test]
+    fn uppercase_duplicates_are_detected() {
+        let keys = KeyConfig {
+            dec1: 'A',
+            dec10: 'a',
+            ..KeyConfig::default()
+        };
+
+        assert_eq!(
+            keys.conflict(),
+            Some(KeyConflict::Duplicate {
+                field: KeyField::Dec10,
+                key: 'a',
+                other: KeyField::Dec1,
+            })
+        );
+    }
+
+    #[test]
+    fn reserved_bindings_are_detected() {
+        for key in RESERVED_BINDINGS {
+            let keys = KeyConfig {
+                quit: key,
+                ..KeyConfig::default()
+            };
+
+            assert_eq!(
+                keys.conflict(),
+                Some(KeyConflict::Reserved {
+                    field: KeyField::Quit,
+                    key,
+                }),
+                "reserved key {key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn binding_available_accepts_an_unused_key() {
+        assert_eq!(
+            KeyConfig::default().binding_available(KeyField::Dec1, 'z'),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn binding_available_rejects_another_fields_key() {
+        assert_eq!(
+            KeyConfig::default().binding_available(KeyField::Quit, 'a'),
+            Err(KeyConflict::Duplicate {
+                field: KeyField::Quit,
+                key: 'a',
+                other: KeyField::Dec1,
+            })
+        );
+    }
+
+    #[test]
+    fn binding_available_rejects_reserved_keys() {
+        for key in RESERVED_BINDINGS {
+            assert_eq!(
+                KeyConfig::default().binding_available(KeyField::Dec1, key),
+                Err(KeyConflict::Reserved {
+                    field: KeyField::Dec1,
+                    key,
+                }),
+                "reserved key {key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn binding_available_allows_the_fields_own_key() {
+        let keys = KeyConfig::default();
+
+        assert_eq!(keys.binding_available(KeyField::Dec1, 'a'), Ok(()));
+        assert_eq!(keys.binding_available(KeyField::Dec1, 'A'), Ok(()));
+    }
+
+    #[test]
+    fn conflict_display_messages_are_stable() {
+        assert_eq!(
+            KeyConflict::Reserved {
+                field: KeyField::Quit,
+                key: 'j',
+            }
+            .to_string(),
+            "quit: 'j' is reserved for sidetone control"
+        );
+        assert_eq!(
+            KeyConflict::Duplicate {
+                field: KeyField::Quit,
+                key: 'a',
+                other: KeyField::Dec1,
+            }
+            .to_string(),
+            "quit: 'a' is already bound to dec1"
+        );
     }
 
     // ---------------------------------------------------------------- reads
@@ -791,12 +1139,65 @@ quit = \"r\"
         let before = fs::read_to_string(&path).unwrap();
 
         let mut lines = vec!["10"];
-        lines.extend(["z", "z", "z", "z", "z", "z", "z", "z", "z"]);
+        lines.extend(["b", "c", "d", "e", "g", "i", "m", "n", "o"]);
         lines.push("esc");
         run_dialog(&path, &lines);
 
         assert_eq!(fs::read_to_string(&path).unwrap(), before);
         assert_eq!(read(&path), Some(stored));
+    }
+
+    #[test]
+    fn dialog_rejects_duplicate_bindings_and_reprompts() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut lines = vec!["50"];
+
+        // First pass: dec1 collides with the default dec10 binding.
+        lines.extend(["s", "", "", "", "", "", "", "", ""]);
+        // Second pass: move dec1 to a free key.
+        lines.extend(["b", "", "", "", "", "", "", "", ""]);
+        lines.push("w");
+
+        let output = run_dialog(&path, &lines);
+
+        assert!(output.contains("Invalid keybindings: dec10: 's' is already bound to dec1"));
+        let config = read(&path).expect("dialog should write the file");
+        assert_eq!(config.keys.dec1, 'b');
+        assert_eq!(config.keys.dec10, 's');
+    }
+
+    #[test]
+    fn dialog_rejects_reserved_bindings_and_reprompts() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut lines = vec!["50"];
+
+        // First pass: h is reserved for the fixed sidetone shortcut.
+        lines.extend(["h", "", "", "", "", "", "", "", ""]);
+        // Second pass: use a free key.
+        lines.extend(["b", "", "", "", "", "", "", "", ""]);
+        lines.push("w");
+
+        let output = run_dialog(&path, &lines);
+
+        assert!(output.contains("Invalid keybindings: dec1: 'h' is reserved for sidetone control"));
+        assert_eq!(read(&path).unwrap().keys.dec1, 'b');
+    }
+
+    #[test]
+    fn dialog_allows_swapping_two_bindings_in_one_pass() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut lines = vec!["50"];
+        lines.extend(["s", "a", "", "", "", "", "", "", ""]);
+        lines.push("w");
+
+        run_dialog(&path, &lines);
+
+        let config = read(&path).expect("dialog should write the file");
+        assert_eq!(config.keys.dec1, 's');
+        assert_eq!(config.keys.dec10, 'a');
     }
 
     #[test]

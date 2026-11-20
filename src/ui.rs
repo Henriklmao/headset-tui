@@ -1,6 +1,6 @@
 use crate::app::UiState;
-use crate::config::KeyConfig;
-use crate::config_editor::{ConfigEditor, KeyField, Row};
+use crate::config::{KeyConfig, KeyField};
+use crate::config_editor::{ConfigEditor, Row};
 use crate::headset::{BatteryState, SIDETONE_MAX};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -156,7 +156,8 @@ pub fn draw_with_modal(
 
     // Help text
     let help_text = format!(
-        "[{}] Dec-1 [{}] Dec-10 [{}] Inc-1 [{}] Inc-10 [{}] Full [{}] None [{}] Verbose [{}] Config [{}] Quit",
+        "[{}] Dec-1 [{}] Dec-10 [{}] Inc-1 [{}] Inc-10 [{}] Full [{}] None [{}] Verbose [{}] Config [{}] Quit\n\
+         ←/h -1   →/l +1   ↓/j -10   ↑/k +10",
         keys.dec1.to_uppercase(),
         keys.dec10.to_uppercase(),
         keys.inc1.to_uppercase(),
@@ -670,7 +671,7 @@ mod tests {
     #[test]
     fn config_modal_marks_unsaved_changes() {
         let mut editor = editor();
-        editor.config.keys.dec1 = 'j';
+        editor.config.keys.dec1 = 'z';
 
         let rendered = render_with_editor(&state(), &KeyConfig::default(), &editor, WIDTH, HEIGHT);
 
@@ -721,6 +722,26 @@ mod tests {
                 "{expected:?} missing from help footer:\n{rendered}"
             );
         }
+    }
+
+    #[test]
+    fn help_footer_lists_arrow_and_hjkl_shortcuts() {
+        let rendered = render(&state(), &KeyConfig::default());
+
+        for expected in ["←/h -1", "→/l +1", "↓/j -10", "↑/k +10"] {
+            assert!(
+                rendered.contains(expected),
+                "{expected:?} missing from help footer:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn help_footer_shortcuts_fit_at_the_documented_width() {
+        let rendered = buffer_to_string(&render_buffer(&state(), &KeyConfig::default(), 100, 24));
+
+        assert!(rendered.contains("↑/k +10"), "{rendered}");
+        assert!(rendered.contains("[Q] Quit"), "{rendered}");
     }
 
     #[test]

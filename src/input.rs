@@ -1,4 +1,4 @@
-use crate::config::KeyConfig;
+use crate::config::{normalise_binding, KeyConfig};
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use std::time::Duration;
 
@@ -30,19 +30,34 @@ pub fn poll_key() -> Option<KeyEvent> {
     None
 }
 
-/// Map a key event to an action using the configured bindings.
+/// Map a key event to an action.
+///
+/// The arrow keys and `h`/`j`/`k`/`l` are fixed sidetone shortcuts. They win
+/// over configured bindings, and the configuration editors refuse to assign
+/// them to an action.
 pub fn key_to_action(key: KeyEvent, keys: &KeyConfig) -> Action {
+    match key.code {
+        KeyCode::Left => return Action::DecBy1,
+        KeyCode::Right => return Action::IncBy1,
+        KeyCode::Up => return Action::IncBy10,
+        KeyCode::Down => return Action::DecBy10,
+        KeyCode::Esc => return Action::Quit,
+        KeyCode::Char(character) => match normalise_binding(character) {
+            'h' => return Action::DecBy1,
+            'j' => return Action::DecBy10,
+            'k' => return Action::IncBy10,
+            'l' => return Action::IncBy1,
+            _ => {}
+        },
+        _ => return Action::None,
+    }
+
     let KeyCode::Char(character) = key.code else {
-        return if key.code == KeyCode::Esc {
-            Action::Quit
-        } else {
-            Action::None
-        };
+        return Action::None;
     };
 
-    let character = character.to_lowercase().next().unwrap_or(character);
-    let binding_matches =
-        |binding: char| character == binding.to_lowercase().next().unwrap_or(binding);
+    let character = normalise_binding(character);
+    let binding_matches = |binding: char| character == normalise_binding(binding);
 
     if binding_matches(keys.dec1) {
         Action::DecBy1
@@ -82,15 +97,15 @@ mod tests {
 
     fn custom_keys() -> KeyConfig {
         KeyConfig {
-            dec1: 'j',
-            dec10: 'k',
-            inc1: 'l',
+            dec1: 'z',
+            dec10: 'x',
+            inc1: 'o',
             inc10: 'i',
-            full: 'o',
+            full: 'p',
             none: 'u',
-            quit: 'x',
-            config: 'y',
-            verbose: 'h',
+            quit: 'y',
+            config: 'n',
+            verbose: 'm',
         }
     }
 
@@ -142,18 +157,68 @@ mod tests {
         let keys = custom_keys();
 
         for (character, expected) in [
-            ('j', Action::DecBy1),
-            ('k', Action::DecBy10),
-            ('l', Action::IncBy1),
+            ('z', Action::DecBy1),
+            ('x', Action::DecBy10),
+            ('o', Action::IncBy1),
             ('i', Action::IncBy10),
-            ('o', Action::SetFull),
+            ('p', Action::SetFull),
             ('u', Action::SetNone),
-            ('x', Action::Quit),
-            ('y', Action::Config),
-            ('h', Action::ToggleVerbose),
+            ('y', Action::Quit),
+            ('n', Action::Config),
+            ('m', Action::ToggleVerbose),
         ] {
             assert_eq!(key_to_action(press(character), &keys), expected);
         }
+    }
+
+    #[test]
+    fn arrow_keys_adjust_the_sidetone() {
+        for (code, expected) in [
+            (KeyCode::Left, Action::DecBy1),
+            (KeyCode::Right, Action::IncBy1),
+            (KeyCode::Down, Action::DecBy10),
+            (KeyCode::Up, Action::IncBy10),
+        ] {
+            assert_eq!(
+                key_to_action(key(code), &KeyConfig::default()),
+                expected,
+                "{code:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hjkl_adjust_the_sidetone() {
+        let keys = KeyConfig::default();
+
+        for (character, expected) in [
+            ('h', Action::DecBy1),
+            ('j', Action::DecBy10),
+            ('k', Action::IncBy10),
+            ('l', Action::IncBy1),
+            ('H', Action::DecBy1),
+            ('J', Action::DecBy10),
+            ('K', Action::IncBy10),
+            ('L', Action::IncBy1),
+        ] {
+            assert_eq!(
+                key_to_action(press(character), &keys),
+                expected,
+                "{character:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_shortcuts_win_over_a_legacy_conflicting_binding() {
+        // The editors reject this configuration, but an older file may still
+        // contain it. The fixed shortcut keeps working.
+        let keys = KeyConfig {
+            quit: 'h',
+            ..KeyConfig::default()
+        };
+
+        assert_eq!(key_to_action(press('h'), &keys), Action::DecBy1);
     }
 
     #[test]
@@ -199,10 +264,6 @@ mod tests {
             KeyCode::Enter,
             KeyCode::Tab,
             KeyCode::Backspace,
-            KeyCode::Left,
-            KeyCode::Right,
-            KeyCode::Up,
-            KeyCode::Down,
             KeyCode::Delete,
             KeyCode::F(1),
             KeyCode::Insert,
@@ -305,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_bindings_resolve_in_check_order() {
+    fn legacy_duplicate_bindings_resolve_in_check_order() {
         // The lookup is a fixed if/else chain: DecBy1 is checked before Quit, so
         // binding the same character twice keeps the first action.
         let keys = KeyConfig {
