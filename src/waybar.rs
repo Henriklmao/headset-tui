@@ -89,6 +89,7 @@ mod tests {
             battery_level: level,
             battery_state: state,
             has_sidetone: true,
+            sidetone_level: None,
         }
     }
 

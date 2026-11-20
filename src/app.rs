@@ -17,6 +17,8 @@ pub struct UiState {
     pub has_sidetone: bool,
     pub verbose_mode: bool,
     pub mode: Mode,
+    /// Last failure reported by the headset backend, if any.
+    pub last_error: Option<String>,
 }
 
 impl UiState {
@@ -29,6 +31,7 @@ impl UiState {
             has_sidetone: true,
             verbose_mode: false,
             mode,
+            last_error: None,
         }
     }
 }
@@ -49,6 +52,12 @@ pub fn apply_status(state: &mut UiState, result: Result<HeadsetStatus, HeadsetEr
             state.battery = Some(status.battery_level);
             state.battery_state = status.battery_state;
             state.has_sidetone = status.has_sidetone;
+
+            // Only devices that can report the level update the gauge; on all
+            // others the level last set through this app stays visible.
+            if let Some(level) = status.sidetone_level {
+                state.sidetone = level.min(SIDETONE_MAX);
+            }
         }
         Err(_) => {
             state.battery = None;
@@ -63,7 +72,8 @@ pub fn apply_status(state: &mut UiState, result: Result<HeadsetStatus, HeadsetEr
 ///
 /// The sidetone shown in the UI always follows the key press, even when the
 /// headset rejects the write: the gauge is a level selector, not a read-back of
-/// the device (HeadsetControl cannot read sidetone on all devices).
+/// the device (HeadsetControl cannot read sidetone on all devices). A rejected
+/// write is stored in [`UiState::last_error`] so the TUI can show it.
 pub fn apply_action(action: Action, state: &mut UiState, headset: &dyn Headset) -> Outcome {
     match action {
         Action::DecBy1 => shift(state, headset, -1),
@@ -91,8 +101,38 @@ fn set_level(state: &mut UiState, headset: &dyn Headset, level: u8) {
         return;
     }
 
-    let _ = headset.set_sidetone(level);
+    match headset.set_sidetone(level) {
+        Ok(()) => state.last_error = None,
+        Err(err) => state.last_error = Some(err.to_string()),
+    }
+
     state.sidetone = level;
+}
+
+/// Pick the level shown when the TUI starts.
+///
+/// A level reported by the device wins (it may have been changed elsewhere),
+/// then the level this app set last, then the configured default.
+pub fn initial_level(reported: Option<u8>, saved: Option<u8>, default: u8) -> u8 {
+    reported.or(saved).unwrap_or(default).min(SIDETONE_MAX)
+}
+
+/// Read the sidetone level last saved by this app.
+pub fn saved_level(path: &Path) -> Option<u8> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let level = text.trim().parse::<u16>().ok()?;
+
+    Some(level.min(u16::from(SIDETONE_MAX)) as u8)
+}
+
+/// Persist the sidetone level this app last set, creating its directory when
+/// missing.
+pub fn save_level(path: &Path, level: u8) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    std::fs::write(path, level.min(SIDETONE_MAX).to_string())
 }
 
 /// Read whether sidetone is currently toggled on.
@@ -160,6 +200,14 @@ mod tests {
             battery_level: 73,
             battery_state: BatteryState::Good,
             has_sidetone,
+            sidetone_level: None,
+        }
+    }
+
+    fn status_with_sidetone(level: u8) -> HeadsetStatus {
+        HeadsetStatus {
+            sidetone_level: Some(level),
+            ..status(true)
         }
     }
 
@@ -180,6 +228,7 @@ mod tests {
         assert!(state.has_sidetone);
         assert!(!state.verbose_mode);
         assert_eq!(state.mode, Mode::Normal);
+        assert_eq!(state.last_error, None);
     }
 
     #[test]
@@ -237,6 +286,33 @@ mod tests {
         apply_status(&mut state, Ok(status(false)));
 
         assert!(!state.has_sidetone);
+    }
+
+    #[test]
+    fn apply_status_uses_a_level_reported_by_the_device() {
+        let mut state = ui_state(10);
+
+        apply_status(&mut state, Ok(status_with_sidetone(72)));
+
+        assert_eq!(state.sidetone, 72);
+    }
+
+    #[test]
+    fn apply_status_keeps_the_local_level_when_the_device_cannot_report_it() {
+        let mut state = ui_state(10);
+
+        apply_status(&mut state, Ok(status(true)));
+
+        assert_eq!(state.sidetone, 10);
+    }
+
+    #[test]
+    fn apply_status_clamps_a_reported_level() {
+        let mut state = ui_state(10);
+
+        apply_status(&mut state, Ok(status_with_sidetone(200)));
+
+        assert_eq!(state.sidetone, SIDETONE_MAX);
     }
 
     #[test]
@@ -507,6 +583,10 @@ mod tests {
         assert_eq!(outcome, Outcome::Continue);
         assert_eq!(state.sidetone, 9);
         assert_eq!(headset.calls(), vec![9]);
+        assert_eq!(
+            state.last_error.as_deref(),
+            Some("headsetcontrol exited with status 1")
+        );
     }
 
     #[test]
@@ -519,6 +599,34 @@ mod tests {
 
         assert_eq!(state.sidetone, 128);
         assert_eq!(headset.calls(), vec![128]);
+        assert!(state.last_error.is_some());
+    }
+
+    #[test]
+    fn a_successful_write_clears_a_previous_error() {
+        let mut headset = MockHeadset::available();
+        headset.fail_set = true;
+        let mut state = ui_state(10);
+
+        apply_action(Action::IncBy1, &mut state, &headset);
+        assert!(state.last_error.is_some());
+
+        headset.fail_set = false;
+        apply_action(Action::IncBy1, &mut state, &headset);
+
+        assert_eq!(state.last_error, None);
+    }
+
+    #[test]
+    fn a_noop_write_keeps_a_previous_error_visible() {
+        let headset = MockHeadset::available();
+        let mut state = ui_state(0);
+        state.last_error = Some("previous failure".to_string());
+
+        apply_action(Action::SetNone, &mut state, &headset);
+
+        // Nothing was written, so the old error is still relevant.
+        assert_eq!(state.last_error.as_deref(), Some("previous failure"));
     }
 
     // -- apply_action: non-level actions -----------------------------------
@@ -579,6 +687,142 @@ mod tests {
         assert_eq!(outcome, Outcome::Continue);
         assert_eq!(state, before);
         assert!(headset.calls().is_empty());
+    }
+
+    // -- initial_level -----------------------------------------------------
+
+    #[test]
+    fn initial_level_prefers_the_device_reading() {
+        assert_eq!(initial_level(Some(30), Some(40), 50), 30);
+    }
+
+    #[test]
+    fn initial_level_falls_back_to_the_saved_level() {
+        assert_eq!(initial_level(None, Some(40), 50), 40);
+    }
+
+    #[test]
+    fn initial_level_falls_back_to_the_default() {
+        assert_eq!(initial_level(None, None, 50), 50);
+    }
+
+    #[test]
+    fn initial_level_can_be_zero() {
+        assert_eq!(initial_level(Some(0), Some(40), 50), 0);
+        assert_eq!(initial_level(None, Some(0), 50), 0);
+        assert_eq!(initial_level(None, None, 0), 0);
+    }
+
+    #[test]
+    fn initial_level_clamps_the_default() {
+        assert_eq!(initial_level(None, None, 200), SIDETONE_MAX);
+    }
+
+    // -- saved_level -------------------------------------------------------
+
+    #[test]
+    fn saved_level_missing_file_is_none() {
+        let dir = temp_dir();
+
+        assert_eq!(saved_level(&dir.path().join("missing")), None);
+    }
+
+    #[test]
+    fn saved_level_reads_a_written_level() {
+        let dir = temp_dir();
+        let path = dir.path().join("level");
+        std::fs::write(&path, "72").unwrap();
+
+        assert_eq!(saved_level(&path), Some(72));
+    }
+
+    #[test]
+    fn saved_level_ignores_surrounding_whitespace() {
+        let dir = temp_dir();
+        let path = dir.path().join("level");
+        std::fs::write(&path, " 72\n").unwrap();
+
+        assert_eq!(saved_level(&path), Some(72));
+    }
+
+    #[test]
+    fn saved_level_accepts_boundaries() {
+        let dir = temp_dir();
+        let path = dir.path().join("level");
+
+        std::fs::write(&path, "0").unwrap();
+        assert_eq!(saved_level(&path), Some(0));
+
+        std::fs::write(&path, "128").unwrap();
+        assert_eq!(saved_level(&path), Some(SIDETONE_MAX));
+    }
+
+    #[test]
+    fn saved_level_clamps_out_of_range_values() {
+        let dir = temp_dir();
+        let path = dir.path().join("level");
+
+        std::fs::write(&path, "200").unwrap();
+        assert_eq!(saved_level(&path), Some(SIDETONE_MAX));
+
+        std::fs::write(&path, "60000").unwrap();
+        assert_eq!(saved_level(&path), Some(SIDETONE_MAX));
+    }
+
+    #[test]
+    fn saved_level_rejects_garbage() {
+        let dir = temp_dir();
+        let path = dir.path().join("level");
+
+        for content in ["", "abc", "-1", "1.5", "on"] {
+            std::fs::write(&path, content).unwrap();
+            assert_eq!(saved_level(&path), None, "{content:?}");
+        }
+    }
+
+    // -- save_level --------------------------------------------------------
+
+    #[test]
+    fn save_level_writes_the_number() {
+        let dir = temp_dir();
+        let path = dir.path().join("level");
+
+        save_level(&path, 64).unwrap();
+
+        assert_eq!(read(&path), "64");
+        assert_eq!(saved_level(&path), Some(64));
+    }
+
+    #[test]
+    fn save_level_clamps_above_max() {
+        let dir = temp_dir();
+        let path = dir.path().join("level");
+
+        save_level(&path, 200).unwrap();
+
+        assert_eq!(read(&path), SIDETONE_MAX.to_string());
+    }
+
+    #[test]
+    fn save_level_creates_nested_directories() {
+        let dir = temp_dir();
+        let path = dir.path().join("a").join("b").join("level");
+
+        save_level(&path, 12).unwrap();
+
+        assert!(path.exists());
+        assert_eq!(saved_level(&path), Some(12));
+    }
+
+    #[test]
+    fn save_level_overwrites_existing_content() {
+        let dir = temp_dir();
+        let path = dir.path().join("level");
+        std::fs::write(&path, "garbage").unwrap();
+
+        save_level(&path, 0).unwrap();
+
+        assert_eq!(read(&path), "0");
     }
 
     // -- toggle_state ------------------------------------------------------

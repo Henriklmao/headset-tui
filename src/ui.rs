@@ -50,7 +50,7 @@ pub fn draw(f: &mut Frame, state: &UiState, keys: &KeyConfig) {
         Color::Red
     };
 
-    let battery_text = match state.battery {
+    let mut battery_text = vec![match state.battery {
         Some(level) if level >= 0 => Line::from(vec![Span::styled(
             format!("󰋎 Battery: {level}% - {}", state.device_name),
             Style::default().fg(battery_color),
@@ -59,7 +59,14 @@ pub fn draw(f: &mut Frame, state: &UiState, keys: &KeyConfig) {
             "󰋎 Battery: Error",
             Style::default().fg(Color::Red),
         )]),
-    };
+    }];
+
+    if let Some(error) = &state.last_error {
+        battery_text.push(Line::from(vec![Span::styled(
+            format!("󰅚 {error}"),
+            Style::default().fg(Color::Red),
+        )]));
+    }
 
     let battery =
         Paragraph::new(battery_text).block(Block::default().borders(Borders::ALL).title("Status"));
@@ -299,6 +306,28 @@ mod tests {
 
         // Charging wins over the level-based color.
         assert_eq!(color_at(&buffer, "Battery: 5%"), Color::Blue);
+    }
+
+    #[test]
+    fn backend_write_error_is_rendered_in_red() {
+        let mut state = state();
+        state.last_error = Some("headsetcontrol exited with status 1".to_string());
+
+        let buffer = render_buffer(&state, &KeyConfig::default(), WIDTH, HEIGHT);
+        let rendered = buffer_to_string(&buffer);
+
+        assert!(rendered.contains("headsetcontrol exited with status 1"));
+        assert_eq!(
+            color_at(&buffer, "headsetcontrol exited with status 1"),
+            Color::Red
+        );
+    }
+
+    #[test]
+    fn no_error_line_is_rendered_without_an_error() {
+        let buffer = render_buffer(&state(), &KeyConfig::default(), WIDTH, HEIGHT);
+
+        assert!(!buffer_to_string(&buffer).contains("headsetcontrol"));
     }
 
     #[test]

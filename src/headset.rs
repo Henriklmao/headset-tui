@@ -41,6 +41,12 @@ pub struct HeadsetStatus {
     pub battery_level: i32,
     pub battery_state: BatteryState,
     pub has_sidetone: bool,
+    /// Sidetone level read back from the device, when the device can report it.
+    ///
+    /// Many headsets (including several Corsair models) can only *write* the
+    /// sidetone level, so HeadsetControl omits this. `None` means "unknown, use
+    /// the last level this app set".
+    pub sidetone_level: Option<u8>,
 }
 
 /// Device access used by the application.
@@ -125,12 +131,21 @@ struct Device {
     #[serde(default)]
     capabilities_str: Vec<String>,
     battery: Battery,
+    /// Present only on devices that can report the current sidetone level.
+    #[serde(default)]
+    sidetone: Option<SidetoneReading>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Battery {
     status: String,
     level: i32,
+}
+
+#[derive(Debug, Deserialize)]
+struct SidetoneReading {
+    #[serde(default)]
+    level: Option<i64>,
 }
 
 /// Parse `headsetcontrol -o json` output into a [`HeadsetStatus`].
@@ -151,6 +166,16 @@ pub fn parse_status(json: &[u8]) -> Result<HeadsetStatus, HeadsetError> {
             .capabilities_str
             .iter()
             .any(|capability| capability == "sidetone"),
+        sidetone_level: device
+            .sidetone
+            .as_ref()
+            .and_then(|sidetone| sidetone.level)
+            .and_then(|level| {
+                // Negative values are sentinels for "unavailable"; clamp real
+                // readings to the protocol range instead of failing the whole
+                // status document.
+                (level >= 0).then(|| level.min(i64::from(SIDETONE_MAX)) as u8)
+            }),
     })
 }
 
@@ -215,6 +240,18 @@ pub mod mock {
                 battery_level: 42,
                 battery_state: BatteryState::Medium,
                 has_sidetone: true,
+                sidetone_level: None,
+            }))
+        }
+
+        /// A mock whose device can read the current sidetone level back.
+        pub fn readable_sidetone(level: u8) -> Self {
+            Self::new(Ok(HeadsetStatus {
+                device_name: "Test Device".to_string(),
+                battery_level: 42,
+                battery_state: BatteryState::Medium,
+                has_sidetone: true,
+                sidetone_level: Some(level),
             }))
         }
 
@@ -387,6 +424,81 @@ mod tests {
         assert_eq!(status.battery_level, 82);
         assert_eq!(status.battery_state, BatteryState::Good);
         assert!(status.has_sidetone);
+        assert_eq!(status.sidetone_level, None);
+    }
+
+    #[test]
+    fn parse_status_reads_a_reported_sidetone_level() {
+        // HeadsetControl only includes `sidetone` on devices that can report
+        // the current level (CAP_SIDETONE_STATUS).
+        let json = r#"
+        {
+          "devices": [
+            {
+              "product": "Readable Headset",
+              "capabilities_str": ["sidetone", "sidetone status"],
+              "battery": {"status": "BATTERY_AVAILABLE", "level": 80},
+              "sidetone": {
+                "level": 85,
+                "device_level": 2,
+                "name": "Medium"
+              }
+            }
+          ]
+        }
+        "#;
+
+        let status = parse_status(json.as_bytes()).unwrap();
+
+        assert_eq!(status.sidetone_level, Some(85));
+    }
+
+    #[test]
+    fn parse_status_accepts_a_sidetone_object_without_a_level() {
+        let json = r#"
+        {
+          "devices": [
+            {
+              "product": "Odd Headset",
+              "battery": {"status": "BATTERY_AVAILABLE", "level": 50},
+              "sidetone": {"name": "Medium"}
+            }
+          ]
+        }
+        "#;
+
+        assert_eq!(parse_status(json.as_bytes()).unwrap().sidetone_level, None);
+    }
+
+    #[test]
+    fn parse_status_clamps_or_ignores_a_reported_sidetone_level() {
+        for (reported, expected) in [
+            (0, Some(0)),
+            (1, Some(1)),
+            (128, Some(128)),
+            (129, Some(128)),
+            (500, Some(128)),
+            // Negative values are sentinels, not levels.
+            (-1, None),
+        ] {
+            let json = format!(
+                r#"{{
+                  "devices": [
+                    {{
+                      "product": "Loud Headset",
+                      "battery": {{"status": "BATTERY_AVAILABLE", "level": 50}},
+                      "sidetone": {{"level": {reported}}}
+                    }}
+                  ]
+                }}"#
+            );
+
+            assert_eq!(
+                parse_status(json.as_bytes()).unwrap().sidetone_level,
+                expected,
+                "reported level {reported}"
+            );
+        }
     }
 
     #[test]
@@ -709,9 +821,17 @@ mod tests {
                 battery_level: 42,
                 battery_state: BatteryState::Medium,
                 has_sidetone: true,
+                sidetone_level: None,
             }
         );
         assert!(headset.calls().is_empty());
+    }
+
+    #[test]
+    fn mock_can_expose_a_readable_sidetone_level() {
+        let headset = mock::MockHeadset::readable_sidetone(72);
+
+        assert_eq!(headset.status().unwrap().sidetone_level, Some(72));
     }
 
     #[test]

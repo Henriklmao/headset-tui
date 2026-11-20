@@ -67,6 +67,11 @@ pub fn state_path_in(dir: &Path, mode: Mode) -> PathBuf {
     dir.join(format!("headset-tui-sidetone-state{}", mode.suffix()))
 }
 
+/// Path builder for the last-set sidetone level inside `dir`.
+pub fn level_path_in(dir: &Path, mode: Mode) -> PathBuf {
+    dir.join(format!("headset-tui-sidetone-level{}", mode.suffix()))
+}
+
 /// Config file used at runtime.
 ///
 /// Test mode uses `config.test.toml`, so `--config --test` never touches the
@@ -78,6 +83,11 @@ pub fn config_path(mode: Mode) -> PathBuf {
 /// Sidetone toggle state file used at runtime.
 pub fn state_path(mode: Mode) -> PathBuf {
     state_path_in(&cache_dir(), mode)
+}
+
+/// File that remembers the sidetone level this app set last.
+pub fn level_path(mode: Mode) -> PathBuf {
+    level_path_in(&cache_dir(), mode)
 }
 
 /// Load the configuration, creating it with defaults when it does not exist.
@@ -365,6 +375,36 @@ quit = \"r\"
     }
 
     #[test]
+    fn level_path_in_normal_mode_uses_plain_file_name() {
+        let dir = tempdir().unwrap();
+        let path = level_path_in(dir.path(), Mode::Normal);
+
+        assert_eq!(path.file_name().unwrap(), "headset-tui-sidetone-level");
+        assert_eq!(path, dir.path().join("headset-tui-sidetone-level"));
+    }
+
+    #[test]
+    fn level_path_in_test_mode_uses_test_suffix() {
+        let dir = tempdir().unwrap();
+        let path = level_path_in(dir.path(), Mode::Test);
+
+        assert_eq!(path.file_name().unwrap(), "headset-tui-sidetone-level.test");
+        assert_eq!(path, dir.path().join("headset-tui-sidetone-level.test"));
+    }
+
+    #[test]
+    fn level_path_in_stays_inside_given_directory() {
+        let dir = tempdir().unwrap();
+
+        for mode in [Mode::Normal, Mode::Test] {
+            let path = level_path_in(dir.path(), mode);
+
+            assert!(path.starts_with(dir.path()));
+            assert_eq!(path.parent(), Some(dir.path()));
+        }
+    }
+
+    #[test]
     fn normal_and_test_paths_are_distinct() {
         let dir = tempdir().unwrap();
 
@@ -375,6 +415,10 @@ quit = \"r\"
         assert_ne!(
             state_path_in(dir.path(), Mode::Normal),
             state_path_in(dir.path(), Mode::Test)
+        );
+        assert_ne!(
+            level_path_in(dir.path(), Mode::Normal),
+            level_path_in(dir.path(), Mode::Test)
         );
     }
 

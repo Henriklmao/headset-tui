@@ -143,7 +143,7 @@ USAGE:
 COMMANDS:
     (none)              Launch the interactive TUI
     --waybar-status     Print the Waybar JSON for the battery module
-    --toggle-sidetone   Toggle sidetone between off and the default level
+    --toggle-sidetone   Toggle sidetone between off and the default or last level
     --config            Edit keybindings and default sidetone
     -h, --help          Show this help
 
@@ -681,6 +681,11 @@ mod tests {
     #[test]
     fn help_text_documents_the_tui_default() {
         assert!(help_text().contains("Launch the interactive TUI"));
+    }
+
+    #[test]
+    fn help_text_explains_the_toggle_fallback() {
+        assert!(help_text().contains("default or last level"));
     }
 
     #[test]
