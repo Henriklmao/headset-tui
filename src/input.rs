@@ -21,13 +21,14 @@ pub enum Action {
 /// The configuration modal needs the raw event, while the main screen maps it
 /// to an [`Action`] with [`key_to_action`].
 pub fn poll_key() -> Option<KeyEvent> {
-    if event::poll(Duration::from_millis(100)).unwrap_or(false) {
-        if let Ok(Event::Key(key)) = event::read() {
-            return Some(key);
-        }
+    if !event::poll(Duration::from_millis(100)).unwrap_or(false) {
+        return None;
     }
 
-    None
+    match event::read() {
+        Ok(Event::Key(key)) => Some(key),
+        _ => None,
+    }
 }
 
 /// Map a key event to an action.

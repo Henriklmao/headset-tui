@@ -98,10 +98,12 @@ fn toggle_sidetone(mode: Mode) -> Result<(), Box<dyn std::error::Error>> {
     let headset = HeadsetControl::new(mode);
     let on = app::toggle_sidetone(&headset, level, &config::state_path(mode))?;
 
-    if on {
-        if let Err(err) = app::save_level(&level_path, level) {
-            eprintln!("headset-tui: could not save sidetone level: {err}");
-        }
+    if !on {
+        return Ok(());
+    }
+
+    if let Err(err) = app::save_level(&level_path, level) {
+        eprintln!("headset-tui: could not save sidetone level: {err}");
     }
 
     Ok(())
@@ -258,9 +260,7 @@ fn run_app(
             // A device that can report its level may have been changed
             // elsewhere; remember the new value.
             if state.sidetone != before {
-                if let Err(err) = save_sidetone_state(level_path, state_path, state.sidetone) {
-                    state.last_error = Some(format!("could not save sidetone state: {err}"));
-                }
+                remember_sidetone(state, level_path, state_path);
             }
 
             last_refresh = Instant::now();
@@ -277,13 +277,18 @@ fn run_app(
         }
 
         if state.sidetone != before {
-            if let Err(err) = save_sidetone_state(level_path, state_path, state.sidetone) {
-                state.last_error = Some(format!("could not save sidetone state: {err}"));
-            }
+            remember_sidetone(state, level_path, state_path);
         }
     }
 
     Ok(())
+}
+
+/// Persist the level shown in the TUI and record any write error on the state.
+fn remember_sidetone(state: &mut UiState, level_path: &Path, state_path: &Path) {
+    if let Err(err) = save_sidetone_state(level_path, state_path, state.sidetone) {
+        state.last_error = Some(format!("could not save sidetone state: {err}"));
+    }
 }
 
 /// Remember the level shown in the TUI so the next session (and the Waybar
