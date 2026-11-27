@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
     # The toolchain is pinned so a new stable clippy cannot break a commit that
     # was green before (clippy 1.99 added needless_borrows_for_generic_args).
@@ -67,7 +67,7 @@ jobs:
         cp target/release/headset-tui "dist/headset-tui-${BUILD_NAME}-x86_64-linux-gnu"
 
     - name: Upload build artifact
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: headset-tui-${{ steps.build.outputs.name }}-x86_64-linux-gnu
         path: dist/headset-tui-*-x86_64-linux-gnu
@@ -83,7 +83,7 @@ jobs:
 
     steps:
     - name: Download the built binary
-      uses: actions/download-artifact@v8
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         pattern: headset-tui-*
         merge-multiple: true
