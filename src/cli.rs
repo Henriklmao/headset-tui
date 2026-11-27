@@ -124,7 +124,7 @@ impl Cli {
                         .iter()
                         .filter_map(|command| command.flag())
                         .collect(),
-                ))
+                ));
             }
         };
 

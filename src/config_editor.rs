@@ -3,7 +3,7 @@
 //! The editor is a small form rendered as a modal over the main screen. It owns
 //! a copy of the configuration, so cancelling never touches the file on disk.
 
-use crate::config::{normalise_binding, Config, KeyField};
+use crate::config::{Config, KeyField, normalise_binding};
 use crate::headset::SIDETONE_MAX;
 use crossterm::event::{KeyCode, KeyEvent};
 

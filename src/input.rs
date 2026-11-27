@@ -1,4 +1,4 @@
-use crate::config::{normalise_binding, KeyConfig};
+use crate::config::{KeyConfig, normalise_binding};
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use std::time::Duration;
 

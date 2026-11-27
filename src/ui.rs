@@ -3,11 +3,11 @@ use crate::config::{KeyConfig, KeyField};
 use crate::config_editor::{ConfigEditor, Row};
 use crate::headset::{BatteryState, SIDETONE_MAX};
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Gauge, Paragraph},
-    Frame,
 };
 
 pub fn draw_with_modal(
@@ -285,9 +285,9 @@ mod tests {
     use crate::cli::Mode;
     use crate::config::Config;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
-    use ratatui::Terminal;
 
     const WIDTH: u16 = 120;
     const HEIGHT: u16 = 24;
